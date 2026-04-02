@@ -5,6 +5,7 @@ Domain helpers for terrain and world-surface authoring.
 Current scope:
 
 - Regular heightfield grids defined over `x,z`
+- Deterministic fractal noise to generate terrain heights
 - CPU-side height queries from world coordinates
 - CPU-side mesh generation for rendering adapters
 
