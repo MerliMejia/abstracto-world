@@ -19,12 +19,14 @@ struct TerrainConfig {
   float noiseLacunarity = 2.0f;
   uint32_t noiseSeed = 0;
   std::vector<float> heightOffsets;
+  std::vector<glm::vec4> vertexColors;
 };
 
 struct TerrainVertex {
   glm::vec3 position{0.0f};
   glm::vec3 normal{0.0f, 1.0f, 0.0f};
   glm::vec2 uv{0.0f};
+  glm::vec4 color{1.0f};
 };
 
 struct TerrainMeshData {
@@ -47,13 +49,22 @@ public:
     config.heightOffsets.assign(requiredVertexCount, 0.0f);
   }
 
-  static void resampleHeightOffsets(TerrainConfig &config, uint32_t xSegments,
+  static void ensureVertexColors(TerrainConfig &config) {
+    const size_t requiredVertexCount = vertexCount(config);
+    if (config.vertexColors.size() == requiredVertexCount) {
+      return;
+    }
+    config.vertexColors.assign(requiredVertexCount, glm::vec4(1.0f));
+  }
+
+  static void resampleSurfaceLayers(TerrainConfig &config, uint32_t xSegments,
                                     uint32_t zSegments) {
     const uint32_t resolvedXSegments = std::max(xSegments, 1u);
     const uint32_t resolvedZSegments = std::max(zSegments, 1u);
     if (config.xSegments == resolvedXSegments &&
         config.zSegments == resolvedZSegments &&
-        config.heightOffsets.size() == vertexCount(config)) {
+        config.heightOffsets.size() == vertexCount(config) &&
+        config.vertexColors.size() == vertexCount(config)) {
       return;
     }
 
@@ -61,7 +72,9 @@ public:
     const uint32_t xVertexCount = resolvedXSegments + 1;
     const uint32_t zVertexCount = resolvedZSegments + 1;
     std::vector<float> resampledOffsets;
+    std::vector<glm::vec4> resampledColors;
     resampledOffsets.reserve(static_cast<size_t>(xVertexCount) * zVertexCount);
+    resampledColors.reserve(static_cast<size_t>(xVertexCount) * zVertexCount);
 
     for (uint32_t zIndex = 0; zIndex < zVertexCount; ++zIndex) {
       const float zAlpha =
@@ -72,12 +85,14 @@ public:
             static_cast<float>(xIndex) / static_cast<float>(resolvedXSegments);
         const float x = (xAlpha - 0.5f) * sourceConfig.sizeX;
         resampledOffsets.push_back(sampleHeightOffset(sourceConfig, x, z));
+        resampledColors.push_back(sampleVertexColor(sourceConfig, x, z));
       }
     }
 
     config.xSegments = resolvedXSegments;
     config.zSegments = resolvedZSegments;
     config.heightOffsets = std::move(resampledOffsets);
+    config.vertexColors = std::move(resampledColors);
   }
 
   static TerrainMeshData buildMesh(const TerrainConfig &config) {
@@ -104,6 +119,7 @@ public:
         mesh.vertices.push_back(TerrainVertex{
             .position = {x, sampleHeight(config, x, z), z},
             .uv = {xAlpha * config.uvScale.x, zAlpha * config.uvScale.y},
+            .color = sampleVertexColor(config, x, z),
         });
       }
     }
@@ -223,6 +239,59 @@ public:
     return changed;
   }
 
+  static bool applyColorBrush(TerrainConfig &config, const glm::vec2 &center,
+                              float radius, const glm::vec4 &targetColor,
+                              float blendAmount) {
+    if (radius <= 1e-6f || blendAmount <= 1e-6f) {
+      return false;
+    }
+
+    ensureVertexColors(config);
+    const uint32_t xSegments = std::max(config.xSegments, 1u);
+    const uint32_t zSegments = std::max(config.zSegments, 1u);
+    const uint32_t xVertexCount = xSegments + 1;
+    const float radiusSquared = radius * radius;
+    bool changed = false;
+
+    for (uint32_t zIndex = 0; zIndex <= zSegments; ++zIndex) {
+      const float zAlpha =
+          static_cast<float>(zIndex) / static_cast<float>(zSegments);
+      const float z = (zAlpha - 0.5f) * config.sizeZ;
+      for (uint32_t xIndex = 0; xIndex <= xSegments; ++xIndex) {
+        const float xAlpha =
+            static_cast<float>(xIndex) / static_cast<float>(xSegments);
+        const float x = (xAlpha - 0.5f) * config.sizeX;
+        const glm::vec2 delta = glm::vec2(x, z) - center;
+        const float distanceSquared = glm::dot(delta, delta);
+        if (distanceSquared > radiusSquared) {
+          continue;
+        }
+
+        const float distance = std::sqrt(distanceSquared);
+        const float linearFalloff = 1.0f - distance / radius;
+        const float weight = smoothstep(linearFalloff);
+        const float colorBlend = glm::clamp(blendAmount * weight, 0.0f, 1.0f);
+        if (colorBlend <= 1e-6f) {
+          continue;
+        }
+
+        const size_t vertexIndex =
+            static_cast<size_t>(zIndex) * xVertexCount + xIndex;
+        const glm::vec4 currentColor = config.vertexColors[vertexIndex];
+        const glm::vec4 nextColor =
+            glm::mix(currentColor, targetColor, colorBlend);
+        if (glm::all(glm::epsilonEqual(currentColor, nextColor, 1e-6f))) {
+          continue;
+        }
+
+        config.vertexColors[vertexIndex] = nextColor;
+        changed = true;
+      }
+    }
+
+    return changed;
+  }
+
   static float maxHeightOffsetMagnitude(const TerrainConfig &config) {
     float maxOffset = 0.0f;
     for (const float offset : config.heightOffsets) {
@@ -300,6 +369,51 @@ private:
     const float hx0 = glm::mix(h00, h10, tx);
     const float hx1 = glm::mix(h01, h11, tx);
     return glm::mix(hx0, hx1, tz);
+  }
+
+  static glm::vec4 sampleVertexColor(const TerrainConfig &config, float x, float z) {
+    if (config.vertexColors.empty()) {
+      return glm::vec4(1.0f);
+    }
+
+    const uint32_t xSegments = std::max(config.xSegments, 1u);
+    const uint32_t zSegments = std::max(config.zSegments, 1u);
+    const uint32_t xVertexCount = xSegments + 1;
+    const uint32_t zVertexCount = zSegments + 1;
+    const size_t requiredVertexCount =
+        static_cast<size_t>(xVertexCount) * zVertexCount;
+    if (config.vertexColors.size() != requiredVertexCount) {
+      return glm::vec4(1.0f);
+    }
+
+    const float normalizedX =
+        glm::clamp((x / std::max(config.sizeX, 1e-6f)) + 0.5f, 0.0f, 1.0f);
+    const float normalizedZ =
+        glm::clamp((z / std::max(config.sizeZ, 1e-6f)) + 0.5f, 0.0f, 1.0f);
+    const float gridX = normalizedX * static_cast<float>(xSegments);
+    const float gridZ = normalizedZ * static_cast<float>(zSegments);
+    const uint32_t x0 =
+        std::min(static_cast<uint32_t>(std::floor(gridX)), xSegments);
+    const uint32_t z0 =
+        std::min(static_cast<uint32_t>(std::floor(gridZ)), zSegments);
+    const uint32_t x1 = std::min(x0 + 1u, xSegments);
+    const uint32_t z1 = std::min(z0 + 1u, zSegments);
+    const float tx = gridX - static_cast<float>(x0);
+    const float tz = gridZ - static_cast<float>(z0);
+
+    const auto sampleColor = [&](uint32_t xIndex, uint32_t zIndex) {
+      const size_t vertexIndex =
+          static_cast<size_t>(zIndex) * xVertexCount + xIndex;
+      return config.vertexColors[vertexIndex];
+    };
+
+    const glm::vec4 c00 = sampleColor(x0, z0);
+    const glm::vec4 c10 = sampleColor(x1, z0);
+    const glm::vec4 c01 = sampleColor(x0, z1);
+    const glm::vec4 c11 = sampleColor(x1, z1);
+    const glm::vec4 cx0 = glm::mix(c00, c10, tx);
+    const glm::vec4 cx1 = glm::mix(c01, c11, tx);
+    return glm::mix(cx0, cx1, tz);
   }
 
   static void computeNormals(TerrainMeshData &mesh) {
