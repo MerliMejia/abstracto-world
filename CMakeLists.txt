@@ -11,8 +11,7 @@ add_library(abstracto_world INTERFACE)
 target_include_directories(abstracto_world INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(abstracto_world INTERFACE glm::glm)
 
-target_link_libraries(AbstractoWorldGridTest PRIVATE abstracto_world)
-
-if(BUILD_TESTING)
+if(BUILD_TESTING AND TARGET AbstractoWorldGridTest)
+  target_link_libraries(AbstractoWorldGridTest PRIVATE abstracto_world)
   add_test(NAME AbstractoWorldGridTest COMMAND AbstractoWorldGridTest)
 endif()
