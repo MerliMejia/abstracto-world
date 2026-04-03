@@ -139,6 +139,57 @@ public:
     return changed;
   }
 
+  static bool applyFlattenBrush(TerrainConfig &config, const glm::vec2 &center,
+                                float radius, float targetHeight,
+                                float maxHeightDelta) {
+    if (radius <= 1e-6f || std::abs(maxHeightDelta) <= 1e-6f) {
+      return false;
+    }
+
+    ensureHeightOffsets(config);
+    const uint32_t xSegments = std::max(config.xSegments, 1u);
+    const uint32_t zSegments = std::max(config.zSegments, 1u);
+    const uint32_t xVertexCount = xSegments + 1;
+    const float radiusSquared = radius * radius;
+    bool changed = false;
+
+    for (uint32_t zIndex = 0; zIndex <= zSegments; ++zIndex) {
+      const float zAlpha =
+          static_cast<float>(zIndex) / static_cast<float>(zSegments);
+      const float z = (zAlpha - 0.5f) * config.sizeZ;
+      for (uint32_t xIndex = 0; xIndex <= xSegments; ++xIndex) {
+        const float xAlpha =
+            static_cast<float>(xIndex) / static_cast<float>(xSegments);
+        const float x = (xAlpha - 0.5f) * config.sizeX;
+        const glm::vec2 delta = glm::vec2(x, z) - center;
+        const float distanceSquared = glm::dot(delta, delta);
+        if (distanceSquared > radiusSquared) {
+          continue;
+        }
+
+        const float distance = std::sqrt(distanceSquared);
+        const float linearFalloff = 1.0f - distance / radius;
+        const float weight = smoothstep(linearFalloff);
+        const size_t vertexIndex =
+            static_cast<size_t>(zIndex) * xVertexCount + xIndex;
+        const float baseHeight = sampleBaseHeight(config, x, z);
+        const float desiredOffset = targetHeight - baseHeight;
+        const float currentOffset = config.heightOffsets[vertexIndex];
+        const float offsetDelta = glm::clamp(
+            desiredOffset - currentOffset, -maxHeightDelta * weight,
+            maxHeightDelta * weight);
+        if (std::abs(offsetDelta) <= 1e-6f) {
+          continue;
+        }
+
+        config.heightOffsets[vertexIndex] += offsetDelta;
+        changed = true;
+      }
+    }
+
+    return changed;
+  }
+
   static float maxHeightOffsetMagnitude(const TerrainConfig &config) {
     float maxOffset = 0.0f;
     for (const float offset : config.heightOffsets) {
