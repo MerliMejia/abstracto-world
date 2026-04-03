@@ -47,6 +47,39 @@ public:
     config.heightOffsets.assign(requiredVertexCount, 0.0f);
   }
 
+  static void resampleHeightOffsets(TerrainConfig &config, uint32_t xSegments,
+                                    uint32_t zSegments) {
+    const uint32_t resolvedXSegments = std::max(xSegments, 1u);
+    const uint32_t resolvedZSegments = std::max(zSegments, 1u);
+    if (config.xSegments == resolvedXSegments &&
+        config.zSegments == resolvedZSegments &&
+        config.heightOffsets.size() == vertexCount(config)) {
+      return;
+    }
+
+    const TerrainConfig sourceConfig = config;
+    const uint32_t xVertexCount = resolvedXSegments + 1;
+    const uint32_t zVertexCount = resolvedZSegments + 1;
+    std::vector<float> resampledOffsets;
+    resampledOffsets.reserve(static_cast<size_t>(xVertexCount) * zVertexCount);
+
+    for (uint32_t zIndex = 0; zIndex < zVertexCount; ++zIndex) {
+      const float zAlpha =
+          static_cast<float>(zIndex) / static_cast<float>(resolvedZSegments);
+      const float z = (zAlpha - 0.5f) * sourceConfig.sizeZ;
+      for (uint32_t xIndex = 0; xIndex < xVertexCount; ++xIndex) {
+        const float xAlpha =
+            static_cast<float>(xIndex) / static_cast<float>(resolvedXSegments);
+        const float x = (xAlpha - 0.5f) * sourceConfig.sizeX;
+        resampledOffsets.push_back(sampleHeightOffset(sourceConfig, x, z));
+      }
+    }
+
+    config.xSegments = resolvedXSegments;
+    config.zSegments = resolvedZSegments;
+    config.heightOffsets = std::move(resampledOffsets);
+  }
+
   static TerrainMeshData buildMesh(const TerrainConfig &config) {
     TerrainMeshData mesh;
 
