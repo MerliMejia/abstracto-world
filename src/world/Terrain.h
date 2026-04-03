@@ -18,6 +18,7 @@ struct TerrainConfig {
   float noisePersistence = 0.5f;
   float noiseLacunarity = 2.0f;
   uint32_t noiseSeed = 0;
+  std::vector<float> heightOffsets;
 };
 
 struct TerrainVertex {
@@ -33,6 +34,19 @@ struct TerrainMeshData {
 
 class TerrainGenerator {
 public:
+  static size_t vertexCount(const TerrainConfig &config) {
+    return static_cast<size_t>(std::max(config.xSegments, 1u) + 1u) *
+           static_cast<size_t>(std::max(config.zSegments, 1u) + 1u);
+  }
+
+  static void ensureHeightOffsets(TerrainConfig &config) {
+    const size_t requiredVertexCount = vertexCount(config);
+    if (config.heightOffsets.size() == requiredVertexCount) {
+      return;
+    }
+    config.heightOffsets.assign(requiredVertexCount, 0.0f);
+  }
+
   static TerrainMeshData buildMesh(const TerrainConfig &config) {
     TerrainMeshData mesh;
 
@@ -82,6 +96,59 @@ public:
   }
 
   static float sampleHeight(const TerrainConfig &config, float x, float z) {
+    return sampleBaseHeight(config, x, z) + sampleHeightOffset(config, x, z);
+  }
+
+  static bool applyBrush(TerrainConfig &config, const glm::vec2 &center,
+                         float radius, float heightDelta) {
+    if (radius <= 1e-6f || std::abs(heightDelta) <= 1e-6f) {
+      return false;
+    }
+
+    ensureHeightOffsets(config);
+    const uint32_t xSegments = std::max(config.xSegments, 1u);
+    const uint32_t zSegments = std::max(config.zSegments, 1u);
+    const uint32_t xVertexCount = xSegments + 1;
+    const float radiusSquared = radius * radius;
+    bool changed = false;
+
+    for (uint32_t zIndex = 0; zIndex <= zSegments; ++zIndex) {
+      const float zAlpha =
+          static_cast<float>(zIndex) / static_cast<float>(zSegments);
+      const float z = (zAlpha - 0.5f) * config.sizeZ;
+      for (uint32_t xIndex = 0; xIndex <= xSegments; ++xIndex) {
+        const float xAlpha =
+            static_cast<float>(xIndex) / static_cast<float>(xSegments);
+        const float x = (xAlpha - 0.5f) * config.sizeX;
+        const glm::vec2 delta = glm::vec2(x, z) - center;
+        const float distanceSquared = glm::dot(delta, delta);
+        if (distanceSquared > radiusSquared) {
+          continue;
+        }
+
+        const float distance = std::sqrt(distanceSquared);
+        const float linearFalloff = 1.0f - distance / radius;
+        const float weight = smoothstep(linearFalloff);
+        const size_t vertexIndex =
+            static_cast<size_t>(zIndex) * xVertexCount + xIndex;
+        config.heightOffsets[vertexIndex] += heightDelta * weight;
+        changed = true;
+      }
+    }
+
+    return changed;
+  }
+
+  static float maxHeightOffsetMagnitude(const TerrainConfig &config) {
+    float maxOffset = 0.0f;
+    for (const float offset : config.heightOffsets) {
+      maxOffset = std::max(maxOffset, std::abs(offset));
+    }
+    return maxOffset;
+  }
+
+private:
+  static float sampleBaseHeight(const TerrainConfig &config, float x, float z) {
     if (config.heightScale <= 1e-6f || config.noiseOctaves == 0) {
       return 0.0f;
     }
@@ -106,7 +173,51 @@ public:
     return (value / amplitudeSum) * config.heightScale;
   }
 
-private:
+  static float sampleHeightOffset(const TerrainConfig &config, float x, float z) {
+    if (config.heightOffsets.empty()) {
+      return 0.0f;
+    }
+
+    const uint32_t xSegments = std::max(config.xSegments, 1u);
+    const uint32_t zSegments = std::max(config.zSegments, 1u);
+    const uint32_t xVertexCount = xSegments + 1;
+    const uint32_t zVertexCount = zSegments + 1;
+    const size_t requiredVertexCount =
+        static_cast<size_t>(xVertexCount) * zVertexCount;
+    if (config.heightOffsets.size() != requiredVertexCount) {
+      return 0.0f;
+    }
+
+    const float normalizedX =
+        glm::clamp((x / std::max(config.sizeX, 1e-6f)) + 0.5f, 0.0f, 1.0f);
+    const float normalizedZ =
+        glm::clamp((z / std::max(config.sizeZ, 1e-6f)) + 0.5f, 0.0f, 1.0f);
+    const float gridX = normalizedX * static_cast<float>(xSegments);
+    const float gridZ = normalizedZ * static_cast<float>(zSegments);
+    const uint32_t x0 =
+        std::min(static_cast<uint32_t>(std::floor(gridX)), xSegments);
+    const uint32_t z0 =
+        std::min(static_cast<uint32_t>(std::floor(gridZ)), zSegments);
+    const uint32_t x1 = std::min(x0 + 1u, xSegments);
+    const uint32_t z1 = std::min(z0 + 1u, zSegments);
+    const float tx = gridX - static_cast<float>(x0);
+    const float tz = gridZ - static_cast<float>(z0);
+
+    const auto sampleOffset = [&](uint32_t xIndex, uint32_t zIndex) {
+      const size_t vertexIndex =
+          static_cast<size_t>(zIndex) * xVertexCount + xIndex;
+      return config.heightOffsets[vertexIndex];
+    };
+
+    const float h00 = sampleOffset(x0, z0);
+    const float h10 = sampleOffset(x1, z0);
+    const float h01 = sampleOffset(x0, z1);
+    const float h11 = sampleOffset(x1, z1);
+    const float hx0 = glm::mix(h00, h10, tx);
+    const float hx1 = glm::mix(h01, h11, tx);
+    return glm::mix(hx0, hx1, tz);
+  }
+
   static void computeNormals(TerrainMeshData &mesh) {
     if (mesh.vertices.empty() || mesh.indices.size() < 3) {
       return;
