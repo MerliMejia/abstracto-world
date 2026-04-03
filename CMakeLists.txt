@@ -11,7 +11,6 @@ add_library(abstracto_world INTERFACE)
 target_include_directories(abstracto_world INTERFACE ${CMAKE_CURRENT_SOURCE_DIR}/src)
 target_link_libraries(abstracto_world INTERFACE glm::glm)
 
-add_executable(AbstractoWorldGridTest apps/grid_test/main.cpp)
 target_link_libraries(AbstractoWorldGridTest PRIVATE abstracto_world)
 
 if(BUILD_TESTING)
